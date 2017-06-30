@@ -82,7 +82,7 @@ Contributed by Jim (BulldogLowell@gmail.com) with much contribution from Pete (p
 //
 
 // Enable debug prints
-//#define MY_DEBUG
+#define MY_DEBUG
 
 // Enable and select radio type attached
 #define MY_RADIO_NRF24
@@ -98,7 +98,7 @@ Contributed by Jim (BulldogLowell@gmail.com) with much contribution from Pete (p
 #include <LiquidCrystal_I2C.h>
 
 
-#define NUMBER_OF_VALVES 8  // Change this to set your valve count up to 16.
+#define NUMBER_OF_VALVES 4  // Change this to set your valve count up to 16.
 #define VALVE_RESET_TIME 7500UL   // Change this (in milliseconds) for the time you need your valves to hydraulically reset and change state
 #define VALVE_TIMES_RELOAD 300000UL  // Change this (in milliseconds) for how often to update all valves data from the controller (Loops at value/number valves)
                                      // ie: 300000 for 8 valves produces requests 37.5seconds with all valves updated every 5mins 
@@ -113,10 +113,12 @@ Contributed by Jim (BulldogLowell@gmail.com) with much contribution from Pete (p
 #define DEBUG_ON   // comment out to supress serial monitor output
 //
 #ifdef ACTIVE_LOW
-#define BITSHIFT_VALVE_NUMBER ~(1U << (valveNumber-1))
+//#define BITSHIFT_VALVE_NUMBER ~(1U << (valveNumber-1))
+#define BITSHIFT_VALVE_NUMBER ~(1U << (valveNumber))
 #define ALL_VALVES_OFF 0xFFFF
 #else
-#define BITSHIFT_VALVE_NUMBER (1U << (valveNumber-1))
+//#define BITSHIFT_VALVE_NUMBER (1U << (valveNumber-1))
+#define BITSHIFT_VALVE_NUMBER (1U << (valveNumber))
 #define ALL_VALVES_OFF 0U
 #endif
 //
@@ -130,7 +132,7 @@ Contributed by Jim (BulldogLowell@gmail.com) with much contribution from Pete (p
 #endif
 //
 typedef enum {
-  STAND_BY_ALL_OFF, RUN_SINGLE_ZONE, RUN_ALL_ZONES, CYCLE_COMPLETE, ZONE_SELECT_MENU
+  STAND_BY_ALL_OFF, RUN_SINGLE_ZONE, RUN_ALL_ZONES, CYCLE_COMPLETE, ZONE_SELECT_MENU, RUN_PUMP_ONLY
 }
 SprinklerStates;
 //
@@ -156,22 +158,23 @@ const char *dayOfWeek[] = {
   "Null", "Sunday ", "Monday ", "Tuesday ", "Wednesday ", "Thursday ", "Friday ", "Saturday "
 };
 // Name your Zones here or use Vera to edit them by adding a name in Variable3...
-String valveNickName[17] = {
-  "All Zones", "Zone 1", "Zone 2", "Zone 3", "Zone 4", "Zone 5", "Zone 6", "Zone 7", "Zone 8", "Zone 9", "Zone 10", "Zone 11", "Zone 12", "Zone 13", "Zone 14", "Zone 15", "Zone 16"
+String valveNickName[18] = {
+  "All Zones", "Zone 1", "Zone 2", "Zone 3", "Zone 4", "Zone 5", "Zone 6", "Zone 7", "Zone 8", "Zone 9", "Zone 10", "Zone 11", "Zone 12", "Zone 13", "Zone 14", "Zone 15", "Zone 16", "Pump"
 };
 //
 time_t lastTimeRun = 0;
 //Setup Shift Register...
-const int latchPin = 8;
+const int latchPin = 6;
 const int clockPin = 4;
 const int dataPin  = 7;
-const int outputEnablePin = 6;
+const int outputEnablePin = A0;
+const int pumpStart = A1;
 //
 byte clock[8] = {0x0, 0xe, 0x15, 0x17, 0x11, 0xe, 0x0}; // fetching time indicator
 byte raindrop[8] = {0x4, 0x4, 0xA, 0xA, 0x11, 0xE, 0x0,}; // fetching Valve Data indicator
 // Set the pins on the I2C chip used for LCD connections:
 //                    addr, en,rw,rs,d4,d5,d6,d7,bl,blpol
-LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address to 0x27
+LiquidCrystal_I2C lcd(0x3F, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address to 0x27. Mine was actually 0x3F
 //
 MyMessage msg1valve(CHILD_ID_SPRINKLER, V_LIGHT);
 MyMessage var1valve(CHILD_ID_SPRINKLER, V_VAR1);
@@ -189,6 +192,9 @@ void setup()
   pinMode(ledPin, OUTPUT);
   pinMode(outputEnablePin, OUTPUT);
   digitalWrite (outputEnablePin, LOW);
+  pinMode(ledPin, OUTPUT);
+  pinMode(pumpStart, OUTPUT);
+  digitalWrite (pumpStart, HIGH);
   pinMode(waterButtonPin, INPUT_PULLUP);
   //pinMode(waterButtonPin, INPUT);
   attachInterrupt(digitalPinToInterrupt(waterButtonPin), PushButton, RISING); //May need to change for your Arduino model
@@ -244,6 +250,8 @@ void setup()
       break;
     }
   }
+  //One above the number of valves is the pump start or master valve relay
+  valveNickName[NUMBER_OF_VALVES + 1] = "Sprinkler Pump";
   //
   //Update valve data when first powered on 
   for (byte i = 1; i <= NUMBER_OF_VALVES; i++)
@@ -252,13 +260,15 @@ void setup()
     goGetValveTimes();
   }
   lcd.clear();
+  inSetup = false ;
 }
 
 
 void presentation()  
 { 
   sendSketchInfo(SKETCH_NAME, SKETCH_VERSION);
-  for (byte i = 0; i <= NUMBER_OF_VALVES; i++)
+  //The NUMBER_OF_VALVES + 1 is adding the 1 for the pump start/master valve relay
+  for (byte i = 0; i <= NUMBER_OF_VALVES + 1; i++)
   {
     present(i, S_LIGHT);
   }
@@ -283,7 +293,7 @@ void loop()
     else if (state == ZONE_SELECT_MENU)
     {
       menuState++;
-      if (menuState > NUMBER_OF_VALVES)
+      if (menuState > NUMBER_OF_VALVES + 1)
       {
         menuState = 0;
       }
@@ -293,6 +303,25 @@ void loop()
       state = STAND_BY_ALL_OFF;
     }
     buttonPushed = false;
+  }
+  if (state == RUN_PUMP_ONLY)
+  {
+      updateRelays(RUN_PUMP_ONLY);
+      DEBUG_PRINTLN(F("State Changed... running the pump only"));
+      for (byte i = 0; i <= NUMBER_OF_VALVES; i++)
+      {
+        wait(50);
+        send(msg1valve.setSensor(i).set(false), false);
+      }
+      //Tell the controller that the pump shut off
+      send(msg1valve.setSensor(NUMBER_OF_VALVES + 1).set(true), false);
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print(F("** Pump  only **"));
+      lcd.setCursor(0,1);
+      lcd.print(F("**    mode    **"));
+      wait(2000);
+      lastValve = -1;
   }
   if (state == STAND_BY_ALL_OFF)
   {
@@ -306,6 +335,8 @@ void loop()
         wait(50);
         send(msg1valve.setSensor(i).set(false), false);
       }
+      //Tell the controller that the pump shut off
+      send(msg1valve.setSensor(NUMBER_OF_VALVES + 1).set(false), false);
       lcd.clear();
       lcd.setCursor(0,0);
       lcd.print(F("** Irrigation **"));
@@ -325,6 +356,8 @@ void loop()
         if (i == 0 || i == valveNumber)
         {
           send(msg1valve.setSensor(i).set(true), false);
+          //Tell the controller that the pump started
+          send(msg1valve.setSensor(NUMBER_OF_VALVES + 1).set(true), false);
         }
         else
         {
@@ -384,6 +417,8 @@ void loop()
         if (i == 0 || i == valveNumber)
         {
           send(msg1valve.setSensor(i).set(true), false);
+          //Tell the controller that the pump started
+          send(msg1valve.setSensor(NUMBER_OF_VALVES + 1).set(true), false);
         }
         else
         {
@@ -411,6 +446,8 @@ void loop()
       {
         send(msg1valve.setSensor(i).set(false), false);
       }
+      //Tell the controller that the pump shut off
+      send(msg1valve.setSensor(NUMBER_OF_VALVES + 1).set(false), false);
       state = CYCLE_COMPLETE;
       startMillis = millis();
       DEBUG_PRINT(F("State = "));
@@ -483,6 +520,17 @@ void displayMenu(void)
 //
 void updateRelays(int value)
 {
+  if (value == ALL_VALVES_OFF) 
+  {
+    digitalWrite(pumpStart, HIGH);
+  }
+  else
+  {
+    digitalWrite(pumpStart, LOW);
+    if (value == RUN_PUMP_ONLY) {
+      value = ALL_VALVES_OFF;
+    }
+  }
   digitalWrite(latchPin, LOW);
   shiftOut(dataPin, clockPin, MSBFIRST, highByte(value));
   shiftOut(dataPin, clockPin, MSBFIRST, lowByte(value));
@@ -526,6 +574,22 @@ void receive(const MyMessage &message)
   if (message.isAck())
   {
     DEBUG_PRINTLN(F("This is an ack from gateway"));
+  }
+  if (message.sensor == NUMBER_OF_VALVES + 1)
+  {
+    if (message.type == V_LIGHT)
+    {
+      if (message.getBool())
+      {
+        state = RUN_PUMP_ONLY; 
+        DEBUG_PRINTLN(F("Recieved Instruction to Start Pump..."));
+      } 
+      else 
+      {
+        state = STAND_BY_ALL_OFF;
+        DEBUG_PRINTLN(F("Recieved Instruction to Stop Pump..."));
+      }
+    }
   }
   for (byte i = 0; i <= NUMBER_OF_VALVES; i++)
   {
